@@ -1,0 +1,55 @@
+/* SQL performance regression check:
+   - BEST_* comes from the minimum avg elapsed seconds per execution in AWR history
+   - LAST_* comes from the most recent AWR snapshot within last 7 days where it executed
+*/
+WITH stat AS (
+    SELECT
+        ss.sql_id,
+        sn.begin_interval_time AS run_date,
+        CASE
+            WHEN ss.executions_delta > 0 THEN
+                (ss.elapsed_time_delta / 1000000) / ss.executions_delta   -- seconds per exec
+        END AS elapsed_seconds
+    FROM dba_hist_sqlstat   ss
+    JOIN dba_hist_snapshot  sn
+      ON sn.dbid            = ss.dbid
+     AND sn.instance_number = ss.instance_number
+     AND sn.snap_id         = ss.snap_id
+    WHERE ss.executions_delta > 0
+      AND ss.elapsed_time_delta > 0
+),
+best_run AS (
+    SELECT
+        sql_id,
+        MIN(elapsed_seconds) AS best_elapsed_seconds,
+        MIN(run_date) KEEP (DENSE_RANK FIRST ORDER BY elapsed_seconds, run_date) AS best_run_date
+    FROM stat
+    WHERE elapsed_seconds IS NOT NULL
+    GROUP BY sql_id
+),
+last_run AS (
+    SELECT
+        sql_id,
+        MAX(run_date) AS last_run_date,
+        MAX(elapsed_seconds) KEEP (DENSE_RANK LAST ORDER BY run_date) AS last_elapsed_seconds
+    FROM stat
+    WHERE run_date > SYSDATE - 7
+      AND elapsed_seconds IS NOT NULL
+    GROUP BY sql_id
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY l.last_run_date DESC) AS s_no,
+    l.sql_id,
+    SUBSTR(t.sql_text, 1, 1000) AS sql_text,
+    b.best_run_date,
+    ROUND(b.best_elapsed_seconds, 3) AS best_elapsed_seconds,
+    l.last_run_date,
+    ROUND(l.last_elapsed_seconds, 3) AS last_elapsed_seconds
+FROM last_run l
+JOIN best_run b
+  ON b.sql_id = l.sql_id
+LEFT JOIN dba_hist_sqltext t
+  ON t.sql_id = l.sql_id
+WHERE l.last_run_date > SYSDATE - 7
+  AND l.last_elapsed_seconds > b.best_elapsed_seconds
+ORDER BY (l.last_elapsed_seconds / NULLIF(b.best_elapsed_seconds, 0)) DESC, l.last_run_date DESC;
