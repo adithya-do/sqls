@@ -1,10 +1,11 @@
-/* SQL performance regression check:
-   - BEST_* comes from the minimum avg elapsed seconds per execution in AWR history
-   - LAST_* comes from the most recent AWR snapshot within last 7 days where it executed
+/* AWR SQL regression check (elapsed seconds per exec)
+   Adds: best/last plan_hash_value
+   Excludes: parsing_schema_name = 'SYS'
 */
 WITH stat AS (
     SELECT
         ss.sql_id,
+        ss.plan_hash_value,
         sn.begin_interval_time AS run_date,
         CASE
             WHEN ss.executions_delta > 0 THEN
@@ -19,19 +20,23 @@ WITH stat AS (
       AND ss.elapsed_time_delta > 0
 ),
 best_run AS (
+    /* Best (fastest) avg elapsed seconds per exec across AWR history */
     SELECT
         sql_id,
         MIN(elapsed_seconds) AS best_elapsed_seconds,
-        MIN(run_date) KEEP (DENSE_RANK FIRST ORDER BY elapsed_seconds, run_date) AS best_run_date
+        MIN(run_date) KEEP (DENSE_RANK FIRST ORDER BY elapsed_seconds, run_date) AS best_run_date,
+        MIN(plan_hash_value) KEEP (DENSE_RANK FIRST ORDER BY elapsed_seconds, run_date) AS best_plan_hash_value
     FROM stat
     WHERE elapsed_seconds IS NOT NULL
     GROUP BY sql_id
 ),
 last_run AS (
+    /* Latest run (within last 7 days) */
     SELECT
         sql_id,
         MAX(run_date) AS last_run_date,
-        MAX(elapsed_seconds) KEEP (DENSE_RANK LAST ORDER BY run_date) AS last_elapsed_seconds
+        MAX(elapsed_seconds) KEEP (DENSE_RANK LAST ORDER BY run_date) AS last_elapsed_seconds,
+        MAX(plan_hash_value) KEEP (DENSE_RANK LAST ORDER BY run_date) AS last_plan_hash_value
     FROM stat
     WHERE run_date > SYSDATE - 7
       AND elapsed_seconds IS NOT NULL
@@ -40,16 +45,47 @@ last_run AS (
 SELECT
     ROW_NUMBER() OVER (ORDER BY l.last_run_date DESC) AS s_no,
     l.sql_id,
-    SUBSTR(t.sql_text, 1, 1000) AS sql_text,
+    SUBSTR(tx.sql_text, 1, 1000) AS sql_text,
+
     b.best_run_date,
     ROUND(b.best_elapsed_seconds, 3) AS best_elapsed_seconds,
+    b.best_plan_hash_value,
+
     l.last_run_date,
-    ROUND(l.last_elapsed_seconds, 3) AS last_elapsed_seconds
+    ROUND(l.last_elapsed_seconds, 3) AS last_elapsed_seconds,
+    l.last_plan_hash_value,
+
+    s.parsing_schema_name
 FROM last_run l
 JOIN best_run b
   ON b.sql_id = l.sql_id
-LEFT JOIN dba_hist_sqltext t
-  ON t.sql_id = l.sql_id
+/* Join SQL text + parsing schema (AWR) */
+JOIN dba_hist_sqlstat ss0
+  ON ss0.sql_id = l.sql_id
+JOIN dba_hist_snapshot sn0
+  ON sn0.dbid            = ss0.dbid
+ AND sn0.instance_number = ss0.instance_number
+ AND sn0.snap_id         = ss0.snap_id
+JOIN dba_hist_sqltext tx
+  ON tx.sql_id = l.sql_id
+/* Get parsing schema from last snapshot row (within 7 days) */
+JOIN (
+    SELECT sql_id,
+           MAX(parsing_schema_name) KEEP (DENSE_RANK LAST ORDER BY begin_interval_time) AS parsing_schema_name
+    FROM (
+        SELECT ss.sql_id, ss.parsing_schema_name, sn.begin_interval_time
+        FROM dba_hist_sqlstat ss
+        JOIN dba_hist_snapshot sn
+          ON sn.dbid            = ss.dbid
+         AND sn.instance_number = ss.instance_number
+         AND sn.snap_id         = ss.snap_id
+        WHERE sn.begin_interval_time > SYSDATE - 7
+    )
+    GROUP BY sql_id
+) s
+  ON s.sql_id = l.sql_id
 WHERE l.last_run_date > SYSDATE - 7
   AND l.last_elapsed_seconds > b.best_elapsed_seconds
-ORDER BY (l.last_elapsed_seconds / NULLIF(b.best_elapsed_seconds, 0)) DESC, l.last_run_date DESC;
+  AND NVL(s.parsing_schema_name,'?') <> 'SYS'
+ORDER BY (l.last_elapsed_seconds / NULLIF(b.best_elapsed_seconds, 0)) DESC,
+         l.last_run_date DESC;
