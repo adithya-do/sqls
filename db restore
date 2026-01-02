@@ -1,0 +1,91 @@
+Restoring Database with Different Name
+
+Using RMAN, a database can be restored with different name on same or different name when source DB is available or not available.
+
+Procedure is given below
+
+Add NEW SID entry in oratab file
+
+Get DBID of Source Database
+sqlplus rman/*******@rmanprd
+SQL> select DBID,NAME from rc_database;
+
+Create password file.
+Export ORACLE_SID=<new sid>
+cd $ORACLE_HOME/dbs
+orapwd file=orapw<new sid> password=p0#ass1um force=yes
+
+export ORA_RMAN_SGA_TARGET 
+export ORA_RMAN_SGA_TARGET=500M
+
+Set DBID of Source database and start the database in nomount state
+rman target / catalog= rman/*******@rmanprd
+RMAN> set dbid <3880765485> ;
+RMAN>startup nomount;
+Restore SP file in /tmp location
+RUN {
+ALLOCATE CHANNEL ch001 TYPE 'SBT_TAPE'…..;
+
+RESTORE SPFILE TO '/tmp/spfilePLM2T.ora' for db_unique_name PLM2TLSG;
+RELEASE CHANNEL ch001;
+}
+
+Shutdown the database
+RMAN> shutdown immediate.
+
+
+Create pfile from the restored spfile
+SQL> create pfile='/db/app/oracle/product/11.2.0/dbhome_1/dbs/initplm2tres.ora' from spfile='/tmp/spfilePLM2T.ora';
+
+Edit the Pfile according to new database name (DB_NAME should not be changed)
+Check Attached Test case for reference
+
+Restore the Control file
+sqlplus / as sysdba
+startup nomount
+rman target / catalog= rman/*******@rmanprd
+RMAN> set DBID=534662516
+RUN {
+ALLOCATE CHANNEL ch001 TYPE 'SBT_TAPE'…. ;
+set until time "to_date('2014-09-06:18:00:00', 'yyyy-mm-dd:hh24:mi:ss')";
+RESTORE controlfile;
+RELEASE CHANNEL ch001;
+}
+Change the redo log location according to new db name
+sqlplus / as sysdba
+alter database mount;
+alter database rename file '/db/redolog.001/plm2tlsg/redolog_1.rdo' to '/db-new/arc5qls3.005/oradata/redolog_1.rdo';
+Check Attached Test case for reference
+
+Restore the Database (Set New Names to Data files in rman script)
+Check Attached Test case for reference
+
+Recover the database as per required Sequence Number or time
+run
+{
+ALLOCATE CHANNEL ch003 TYPE 'SBT_TAPE' …;
+set until time "to_date('2014-09-06:18:00:00', 'yyyy-mm-dd:hh24:mi:ss')";
+recover database;
+}
+run
+{
+ALLOCATE CHANNEL ch003 TYPE 'SBT_TAPE' …;
+set until sequence 2334;
+recover database;
+}
+Change DB Name to New DB Name
+sqlplus / as sysdba
+SQL> alter database backup controlfile to trace;
+shut immediate
+Edit init<SID>.ora file 
+Change Parameter : DB_NAME=NEW SID
+sqlplus / as sysdba
+SQL> startup nomount
+Create New Control file with changed DB name (Get script Form Trace and change the script accordingly)
+CREATE CONTROLFILE REUSE SET DATABASE "<NEW DBNAME>" RESETLOGS  ARCHIVELOG…
+Open Database using reset logs option
+SQL> alter database open resetlogs;
+Create Temporary Tablespace
+create temporary tablespace TEMP1 tempfile '/db-new/arc5qls3.005/oradata/temp01.dbf' size 1 G;
+alter database default temporary tablespace TEMP1;
+Drop tablespace TEMP;
